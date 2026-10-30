@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f7f8fa" />
+    <meta name="description" content="Классическая CRM для управления клиентами, сделками и задачами." />
+    <title>Север — Mini CRM</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="auth.js" defer></script>
+    <script src="supabase-config.js" defer></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <a class="brand" href="#dashboard" aria-label="Север CRM — на главную" data-page="dashboard">
+          <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 40 40"><path d="M20 4.5 34 12.6v14.8L20 35.5 6 27.4V12.6L20 4.5Z"/><path d="m13 23 7-12 7 12M16 19h8"/></svg></span>
+          <span class="brand-copy"><strong>север</strong><small>МИНИ CRM</small></span>
+        </a>
+
+        <div class="workspace-switcher">
+          <span class="workspace-avatar">С</span>
+          <span class="workspace-copy"><strong>Север Групп</strong><small>Рабочее пространство</small></span>
+          <span class="chevron" aria-hidden="true">⌄</span>
+        </div>
+
+        <p class="nav-caption">РАБОЧЕЕ ПРОСТРАНСТВО</p>
+        <nav class="main-nav" aria-label="Основная навигация">
+          <button class="nav-link is-active" type="button" data-page="dashboard"><span class="nav-icon" aria-hidden="true">▦</span><span>Дашборд</span></button>
+          <button class="nav-link" type="button" data-page="clients"><span class="nav-icon" aria-hidden="true">♙</span><span>Клиенты</span><span class="nav-count" id="nav-client-count">0</span></button>
+          <button class="nav-link" type="button" data-page="deals"><span class="nav-icon" aria-hidden="true">◇</span><span>Сделки</span><span class="nav-count" id="nav-deal-count">0</span></button>
+          <button class="nav-link" type="button" data-page="tasks"><span class="nav-icon" aria-hidden="true">☷</span><span>Задачи</span><span class="nav-count" id="nav-task-count">0</span></button>
+        </nav>
+
+        <div class="sidebar-bottom">
+          <div class="help-card">
+            <span class="help-icon">✦</span>
+            <strong>Всё под контролем</strong>
+            <p>Клиенты, сделки и задачи — в одном месте.</p>
+          </div>
+          <button class="profile-button" type="button" aria-label="Профиль пользователя">
+            <span class="profile-avatar">ДА</span>
+            <span class="profile-copy"><strong>Дениз Эрен</strong><small>Администратор</small></span>
+            <span class="profile-more" aria-hidden="true">•••</span>
+          </button>
+        </div>
+      </aside>
+
+      <main class="main-area">
+        <header class="topbar">
+          <button class="mobile-menu-button" id="mobile-menu-button" type="button" aria-label="Открыть меню">☰</button>
+          <div class="breadcrumb"><span>Рабочее пространство</span><span class="breadcrumb-separator">/</span><strong id="breadcrumb-current">Дашборд</strong></div>
+          <div class="topbar-actions">
+            <span class="today-label" id="today-label"></span>
+            <button class="icon-button notification-button" type="button" aria-label="Уведомления"><span aria-hidden="true">♧</span><i></i></button>
+            <span class="topbar-divider"></span>
+            <span class="topbar-avatar" aria-label="Дениз Эрен">ДА</span>
+          </div>
+        </header>
+
+        <div class="page-container" id="page-content" aria-live="polite"></div>
+      </main>
+    </div>
+
+    <div class="sidebar-scrim" id="sidebar-scrim"></div>
+    <div class="modal-root" id="modal-root"></div>
+    <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+  </body>
+</html>
