@@ -1,3 +1,7 @@
+import { createRepository } from "./data-store.js";
+import { isSupabaseConfigured, supabase } from "./supabase-config.js";
+import { getCurrentSession, signIn, signOut, signUp, subscribeToAuthChanges } from "./auth.js";
+
 (() => {
   "use strict";
 
@@ -37,31 +41,23 @@
     ],
   };
 
-  // Репозиторий инкапсулирует источник данных. Позже его методы можно заменить на Supabase,
-  // не переписывая рендеринг экранов и обработчики форм.
-  const repository = (() => {
-    const records = structuredClone(demoData);
-    let sequence = 4000;
-    return {
-      list(entity) { return records[entity].map((record) => ({ ...record })); },
-      get(entity, id) { const record = records[entity].find((item) => item.id === id); return record ? { ...record } : null; },
-      add(entity, values) {
-        const record = { ...values, id: `${entity[0]}-${++sequence}` };
-        records[entity].unshift(record);
-        return { ...record };
-      },
-      update(entity, id, values) {
-        const index = records[entity].findIndex((item) => item.id === id);
-        if (index < 0) return null;
-        records[entity][index] = { ...records[entity][index], ...values, id };
-        return { ...records[entity][index] };
-      },
-    };
-  })();
+  // UI reads from a cache; this adapter switches the cache source between demo data and Supabase.
+  const repository = createRepository(demoData, supabase, isSupabaseConfigured);
 
   const pageContent = document.querySelector("#page-content");
   const modalRoot = document.querySelector("#modal-root");
   const toastRegion = document.querySelector("#toast-region");
+  const appShell = document.querySelector(".app-shell");
+  const authRoot = document.querySelector("#auth-root");
+  const setupBanner = document.querySelector("#setup-banner");
+  const profileButton = document.querySelector("#profile-button");
+  const profileName = document.querySelector("#profile-name");
+  const profileRole = document.querySelector("#profile-role");
+  const profileAvatar = document.querySelector("#profile-avatar");
+  const notificationButton = document.querySelector("#notification-button");
+  const notificationPanel = document.querySelector("#notification-panel");
+  const notificationPanelContent = document.querySelector("#notification-panel-content");
+  const notificationIndicator = document.querySelector("#notification-indicator");
   const breadcrumbCurrent = document.querySelector("#breadcrumb-current");
   const pageNames = { dashboard: "Дашборд", clients: "Клиенты", deals: "Сделки", tasks: "Задачи" };
   const stateLabels = {
@@ -73,6 +69,9 @@
   const categoryOptions = ["Постоянный", "Новый", "Партнёр", "VIP"];
   let activePage = "dashboard";
   let toastTimer;
+  let currentSession = null;
+  let activeUserId = null;
+  let activationPromise = null;
 
   const escapeHTML = (value = "") => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
   const money = (value) => new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 0 }).format(Number(value) || 0);
@@ -94,7 +93,186 @@
     document.querySelector("#nav-client-count").textContent = repository.list("clients").length;
     document.querySelector("#nav-deal-count").textContent = repository.list("deals").length;
     document.querySelector("#nav-task-count").textContent = repository.list("tasks").filter((task) => task.status === "open").length;
+    renderNotifications();
   };
+
+  function renderNotifications() {
+    const tasks = repository.list("tasks")
+      .filter((task) => task.status === "open")
+      .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+    notificationIndicator.hidden = tasks.length === 0;
+    notificationButton.setAttribute("aria-label", tasks.length ? `Уведомления: ${tasks.length} открытых задач` : "Уведомления");
+    notificationPanelContent.innerHTML = `<header class="notification-header"><div><strong>Напоминания</strong><small>${tasks.length ? `${tasks.length} открытых задач` : "Задачи по сроку"}</small></div><button class="notification-close" id="notification-close" type="button" aria-label="Закрыть уведомления">×</button></header>${tasks.length ? `<div class="notification-list">${tasks.slice(0, 6).map((task) => {
+      const client = getClient(task.clientId);
+      const overdue = task.dueDate < isoDate();
+      return `<button class="notification-item" type="button" data-notification-task="${escapeHTML(task.id)}"><span class="notification-item-mark ${overdue ? "is-overdue" : ""}" aria-hidden="true">${overdue ? "!" : "•"}</span><span class="notification-item-copy"><strong>${escapeHTML(task.title)}</strong><small>${escapeHTML(client?.name || "Без клиента")} · ${overdue ? "Просрочена" : `Срок ${escapeHTML(displayDate(task.dueDate, { day: "numeric", month: "short" }))}`}</small></span></button>`;
+    }).join("")}</div>` : `<p class="notification-empty">Открытых задач пока нет.</p>`}`;
+  }
+
+  function closeNotifications() {
+    notificationPanel.hidden = true;
+    notificationButton.setAttribute("aria-expanded", "false");
+  }
+
+  notificationButton.addEventListener("click", () => {
+    const isOpen = notificationPanel.hidden;
+    notificationPanel.hidden = !isOpen;
+    notificationButton.setAttribute("aria-expanded", String(isOpen));
+  });
+
+  function updateProfile(user) {
+    const email = user?.email || "Демо-режим";
+    profileName.textContent = email;
+    profileRole.textContent = user ? "Аккаунт Supabase" : "Supabase не настроен";
+    profileAvatar.textContent = initials(email);
+    profileButton.disabled = !user;
+    profileButton.setAttribute("aria-label", user ? `Выйти из аккаунта ${email}` : "Демо-режим");
+  }
+
+  function renderAuth(mode = "sign-in", message = "") {
+    appShell.hidden = true;
+    authRoot.hidden = false;
+    const isSignUp = mode === "sign-up";
+    authRoot.innerHTML = `<section class="auth-card"><a class="brand auth-brand" href="#" aria-label="Север CRM"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 40 40"><path d="M20 4.5 34 12.6v14.8L20 35.5 6 27.4V12.6L20 4.5Z"/><path d="m13 23 7-12 7 12M16 19h8"/></svg></span><span class="brand-copy"><strong>север</strong><small>МИНИ CRM</small></span></a><p class="eyebrow">БЕЗОПАСНЫЙ ДОСТУП</p><h1>${isSignUp ? "Создать аккаунт" : "С возвращением"}</h1><p class="auth-description">${isSignUp ? "Зарегистрируйтесь, чтобы начать работу с CRM." : "Войдите в аккаунт, чтобы открыть клиентов, сделки и задачи."}</p><form id="auth-form" data-auth-mode="${mode}"><label class="form-field"><span>Email</span><input type="email" name="email" autocomplete="email" placeholder="name@example.com" required /></label><label class="form-field"><span>Пароль</span><input type="password" name="password" autocomplete="${isSignUp ? "new-password" : "current-password"}" minlength="8" placeholder="Не менее 8 символов" required /></label><p class="auth-message ${message ? "is-visible" : ""}" id="auth-message" role="status">${escapeHTML(message)}</p><button class="button button-primary auth-submit" type="submit">${isSignUp ? "Создать аккаунт" : "Войти"}</button></form><p class="auth-switch">${isSignUp ? "Уже есть аккаунт?" : "Впервые здесь?"} <button type="button" data-auth-switch="${isSignUp ? "sign-in" : "sign-up"}">${isSignUp ? "Войти" : "Зарегистрироваться"}</button></p><p class="auth-security">Доступ к данным защищён политиками RLS в Supabase.</p></section>`;
+  }
+
+  function authErrorMessage(error) {
+    const message = String(error?.message || "");
+    if (/invalid login credentials/i.test(message)) return "Неверный email или пароль.";
+    if (/email not confirmed/i.test(message)) return "Подтвердите email по ссылке из письма и войдите снова.";
+    if (/user already registered/i.test(message)) return "Аккаунт с таким email уже существует. Попробуйте войти.";
+    return message || "Не удалось выполнить вход. Попробуйте ещё раз.";
+  }
+
+  function databaseErrorMessage(error) {
+    const message = String(error?.message || "");
+    if (/relation .* does not exist|could not find the table|schema cache/i.test(message)) {
+      return "Таблицы CRM не найдены. Примените SQL-миграцию из supabase/migrations и повторите попытку.";
+    }
+    if (/row-level security|permission denied|42501/i.test(message)) {
+      return "Доступ запрещён. Проверьте вход в аккаунт и политики RLS в Supabase.";
+    }
+    return "Не удалось загрузить данные из Supabase. Проверьте URL проекта, Data API и применённую миграцию.";
+  }
+
+  function writeErrorMessage(error) {
+    const message = String(error?.message || "");
+    if (/23503|foreign key|violates.*constraint/i.test(message)) {
+      return "Не удалось удалить запись: сначала удалите связанные задачи или сделки.";
+    }
+    if (/row-level security|permission denied|42501/i.test(message)) {
+      return "Операция запрещена политикой доступа. Проверьте вход и RLS в Supabase.";
+    }
+    if (/relation .* does not exist|could not find the table|schema cache/i.test(message)) {
+      return "Таблицы CRM не найдены. Сначала примените SQL-миграцию.";
+    }
+    return "Не удалось сохранить изменения в Supabase. Проверьте соединение и повторите попытку.";
+  }
+
+  function showDataLoadError(error) {
+    appShell.hidden = true;
+    authRoot.hidden = false;
+    authRoot.innerHTML = `<section class="auth-card"><a class="brand auth-brand" href="#"><span class="brand-mark" aria-hidden="true">!</span><span class="brand-copy"><strong>север</strong><small>МИНИ CRM</small></span></a><p class="eyebrow">ПРОБЛЕМА ПОДКЛЮЧЕНИЯ</p><h1>Не удалось загрузить CRM</h1><p class="auth-description">${escapeHTML(databaseErrorMessage(error))}</p><div class="auth-actions"><button class="button button-primary" type="button" data-auth-action="retry">Повторить</button><button class="button" type="button" data-auth-action="sign-out">Выйти</button></div></section>`;
+  }
+
+  async function activateSession(session) {
+    const user = session?.user;
+    if (!user) {
+      renderAuth();
+      return false;
+    }
+    if (activeUserId === user.id && !appShell.hidden) return true;
+    if (activationPromise) return activationPromise;
+
+    activationPromise = (async () => {
+      currentSession = session;
+      authRoot.hidden = false;
+      authRoot.innerHTML = `<section class="auth-card auth-loading"><span class="loading-spinner" aria-hidden="true"></span><p>Загружаем ваши данные…</p></section>`;
+      appShell.hidden = true;
+      try {
+        await repository.load();
+      } catch (error) {
+        showDataLoadError(error);
+        return false;
+      }
+      activeUserId = user.id;
+      setupBanner.hidden = true;
+      updateProfile(user);
+      authRoot.hidden = true;
+      appShell.hidden = false;
+      render();
+      return true;
+    })();
+    try {
+      return await activationPromise;
+    } finally {
+      activationPromise = null;
+    }
+  }
+
+  function handleSignedOut(message = "") {
+    currentSession = null;
+    activeUserId = null;
+    repository.clear();
+    updateProfile(null);
+    renderAuth("sign-in", message);
+  }
+
+  async function submitAuthForm(form) {
+    const formData = new FormData(form);
+    const email = String(formData.get("email") || "").trim();
+    const password = String(formData.get("password") || "");
+    const mode = form.dataset.authMode;
+    const button = form.querySelector("button[type=submit]");
+    const message = authRoot.querySelector("#auth-message");
+    button.disabled = true;
+    if (message) message.textContent = "";
+    try {
+      const result = mode === "sign-up" ? await signUp(email, password) : await signIn(email, password);
+      if (result.session) {
+        await activateSession(result.session);
+      } else if (mode === "sign-up") {
+        renderAuth("sign-in", "Аккаунт создан. Подтвердите email по ссылке из письма, затем войдите.");
+      } else {
+        throw new Error("Supabase не вернул активную сессию. Попробуйте войти ещё раз.");
+      }
+    } catch (error) {
+      if (message) {
+        message.textContent = authErrorMessage(error);
+        message.classList.add("is-visible");
+      }
+    } finally {
+      if (button.isConnected) button.disabled = false;
+    }
+  }
+
+  async function initializeAuthentication() {
+    if (!isSupabaseConfigured) {
+      setupBanner.hidden = false;
+      updateProfile(null);
+      render();
+      return;
+    }
+    setupBanner.hidden = true;
+    appShell.hidden = true;
+    authRoot.hidden = false;
+    authRoot.innerHTML = `<section class="auth-card auth-loading"><span class="loading-spinner" aria-hidden="true"></span><p>Проверяем сессию…</p></section>`;
+    const subscription = subscribeToAuthChanges((event, session) => {
+      window.setTimeout(() => {
+        if (event === "SIGNED_OUT") handleSignedOut();
+        else if (session?.user) void activateSession(session);
+      }, 0);
+    });
+    window.addEventListener("beforeunload", () => subscription.unsubscribe(), { once: true });
+    try {
+      const { data, error } = await getCurrentSession();
+      if (error) throw error;
+      if (data.session) await activateSession(data.session);
+      else renderAuth();
+    } catch (error) {
+      renderAuth("sign-in", authErrorMessage(error));
+    }
+  }
 
   function taskCheckboxMarkup(task, surface) {
     const actionLabel = task.status === "completed" ? `Вернуть задачу «${task.title}» в работу` : `Отметить задачу «${task.title}» выполненной`;
@@ -205,7 +383,7 @@
     if (entity === "deals") return count === 1 ? "сделка" : count > 1 && count < 5 ? "сделки" : "сделок";
     return count === 1 ? "задача" : count > 1 && count < 5 ? "задачи" : "задач";
   }
-  const actionButtons = (entity, id) => `<div class="row-actions"><button class="row-action" type="button" title="Просмотреть" aria-label="Просмотреть" data-action="view" data-entity="${entity}" data-id="${escapeHTML(id)}">↗</button><button class="row-action" type="button" title="Редактировать" aria-label="Редактировать" data-action="edit" data-entity="${entity}" data-id="${escapeHTML(id)}">✎</button></div>`;
+  const actionButtons = (entity, id) => `<div class="row-actions"><button class="row-action" type="button" title="Просмотреть" aria-label="Просмотреть" data-action="view" data-entity="${entity}" data-id="${escapeHTML(id)}">↗</button><button class="row-action" type="button" title="Редактировать" aria-label="Редактировать" data-action="edit" data-entity="${entity}" data-id="${escapeHTML(id)}">✎</button><button class="row-action danger" type="button" title="Удалить" aria-label="Удалить" data-action="delete" data-entity="${entity}" data-id="${escapeHTML(id)}">×</button></div>`;
   function renderClientTable(records) {
     return `<table><thead><tr><th>Клиент</th><th>Компания</th><th>Категория</th><th>Статус</th><th>Добавлен</th><th></th></tr></thead><tbody>${records.map((client, index) => `<tr><td><div class="primary-cell"><span class="${avatarClass(index)}">${escapeHTML(initials(client.name))}</span><span><strong>${escapeHTML(client.name)}</strong><small>${escapeHTML(client.email || "Email не указан")}</small></span></div></td><td>${escapeHTML(client.company || "—")}</td><td>${escapeHTML(client.category || "—")}</td><td>${badge("client", client.status)}</td><td>${escapeHTML(displayDate(client.createdAt))}</td><td>${actionButtons("clients", client.id)}</td></tr>`).join("")}</tbody></table>`;
   }
@@ -302,7 +480,7 @@
     }
   }
 
-  function setTaskStatus(id, completed, surface) {
+  async function setTaskStatus(id, completed, surface) {
     const task = repository.get("tasks", id);
     if (!task) {
       showToast("Не удалось найти задачу. Обновите список и попробуйте ещё раз.");
@@ -310,18 +488,79 @@
       return false;
     }
     const nextStatus = completed ? "completed" : "open";
-    if (task.status !== nextStatus && !repository.update("tasks", id, { status: nextStatus })) {
-      showToast("Не удалось обновить задачу. Попробуйте ещё раз.");
+    try {
+      if (task.status !== nextStatus && !await repository.update("tasks", id, { status: nextStatus })) {
+        showToast("Не удалось обновить задачу. Обновите список и попробуйте ещё раз.");
+        refreshTaskSurface(surface);
+        return false;
+      }
+      updateNavCounts();
+      refreshTaskSurface(surface);
+      return true;
+    } catch (error) {
+      showToast(writeErrorMessage(error));
       refreshTaskSurface(surface);
       return false;
     }
-
-    updateNavCounts();
-    refreshTaskSurface(surface);
-    return true;
   }
 
-  document.addEventListener("click", (event) => {
+  async function deleteRecord(entity, id, returnClientId = "") {
+    const record = repository.get(entity, id);
+    if (!record) {
+      showToast("Запись уже недоступна. Обновите список.");
+      if (activePage === "dashboard") renderDashboard();
+      else renderEntityPage(activePage);
+      return;
+    }
+    const label = entity === "clients" ? record.name : record.title;
+    if (!window.confirm(`Удалить «${label}»? Это действие нельзя отменить.`)) return;
+    try {
+      const deleted = await repository.delete(entity, id);
+      if (!deleted) {
+        showToast("Запись не найдена или у вас нет доступа к ней.");
+        return;
+      }
+      updateNavCounts();
+      if (returnClientId && getClient(returnClientId)) openDetails("clients", returnClientId);
+      else if (activePage === "dashboard") renderDashboard();
+      else renderEntityPage(activePage);
+      showToast("Запись удалена");
+    } catch (error) {
+      showToast(writeErrorMessage(error));
+    }
+  }
+
+  document.addEventListener("click", async (event) => {
+    if (event.target.closest("#notification-close")) {
+      closeNotifications();
+      return;
+    }
+    const notificationTask = event.target.closest("[data-notification-task]");
+    if (notificationTask) {
+      closeNotifications();
+      openDetails("tasks", notificationTask.dataset.notificationTask);
+      return;
+    }
+    if (!event.target.closest(".notification-wrap")) closeNotifications();
+
+    const authSwitch = event.target.closest("[data-auth-switch]");
+    if (authSwitch) {
+      renderAuth(authSwitch.dataset.authSwitch);
+      return;
+    }
+    const authAction = event.target.closest("[data-auth-action]");
+    if (authAction) {
+      if (authAction.dataset.authAction === "retry" && currentSession) await activateSession(currentSession);
+      if (authAction.dataset.authAction === "sign-out") {
+        try {
+          await signOut();
+          handleSignedOut("Вы вышли из аккаунта.");
+        } catch (error) {
+          showToast(authErrorMessage(error));
+        }
+      }
+      return;
+    }
     const pageLink = event.target.closest("[data-page]");
     if (pageLink) {
       event.preventDefault();
@@ -336,7 +575,16 @@
     if (action.dataset.action === "new") openForm(action.dataset.entity, "", { prefillClientId: action.dataset.prefillClient, returnClientId: action.dataset.returnClient });
     if (action.dataset.action === "edit") openForm(action.dataset.entity, action.dataset.id, { returnClientId: action.dataset.returnClient });
     if (action.dataset.action === "view") openDetails(action.dataset.entity, action.dataset.id);
+    if (action.dataset.action === "delete") await deleteRecord(action.dataset.entity, action.dataset.id, action.dataset.returnClient);
     if (action.dataset.action === "close-modal") closeModal();
+    if (action.dataset.action === "sign-out") {
+      try {
+        await signOut();
+        handleSignedOut("Вы вышли из аккаунта.");
+      } catch (error) {
+        showToast(authErrorMessage(error));
+      }
+    }
   });
 
   document.addEventListener("input", (event) => {
@@ -344,7 +592,7 @@
   });
   document.addEventListener("change", (event) => {
     if (event.target.matches("[data-task-toggle]")) {
-      setTaskStatus(event.target.dataset.taskId, event.target.checked, event.target.dataset.taskSurface);
+      void setTaskStatus(event.target.dataset.taskId, event.target.checked, event.target.dataset.taskSurface);
       return;
     }
     if (event.target.matches("[data-filter]")) renderEntityTable(activePage);
@@ -365,7 +613,12 @@
     }
   });
 
-  document.addEventListener("submit", (event) => {
+  document.addEventListener("submit", async (event) => {
+    if (event.target.id === "auth-form") {
+      event.preventDefault();
+      await submitAuthForm(event.target);
+      return;
+    }
     if (event.target.id !== "record-form") return;
     event.preventDefault();
     const form = event.target;
@@ -386,14 +639,23 @@
       const previous = id ? repository.get(entity, id) : null;
       values.createdAt = previous?.createdAt || isoDate();
     }
-    const updated = id ? repository.update(entity, id, values) : repository.add(entity, entity === "clients" ? { ...values, createdAt: isoDate() } : entity === "deals" ? { ...values, createdAt: isoDate() } : values);
-    if (!updated) return;
-    const returnClientId = modalRoot.dataset.returnClientId;
-    closeModal();
-    updateNavCounts();
-    if (returnClientId && getClient(returnClientId)) openDetails("clients", returnClientId);
-    else if (activePage === "dashboard") renderDashboard(); else renderEntityPage(activePage);
-    showToast(id ? "Изменения сохранены" : "Запись добавлена");
+    try {
+      const updated = id
+        ? await repository.update(entity, id, values)
+        : await repository.add(entity, entity === "clients" ? { ...values, createdAt: isoDate() } : entity === "deals" ? { ...values, createdAt: isoDate() } : values);
+      if (!updated) {
+        showToast("Запись не найдена или у вас нет доступа к ней.");
+        return;
+      }
+      const returnClientId = modalRoot.dataset.returnClientId;
+      closeModal();
+      updateNavCounts();
+      if (returnClientId && getClient(returnClientId)) openDetails("clients", returnClientId);
+      else if (activePage === "dashboard") renderDashboard(); else renderEntityPage(activePage);
+      showToast(id ? "Изменения сохранены" : "Запись добавлена");
+    } catch (error) {
+      showToast(writeErrorMessage(error));
+    }
   });
 
   document.querySelector("#mobile-menu-button").addEventListener("click", () => {
@@ -406,6 +668,7 @@
   });
   modalRoot.addEventListener("click", (event) => { if (event.target === modalRoot) closeModal(); });
   document.addEventListener("keydown", (event) => { if (event.key === "Escape" && modalRoot.innerHTML) closeModal(); });
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !notificationPanel.hidden) closeNotifications(); });
 
-  render();
+  void initializeAuthentication();
 })();
